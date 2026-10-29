@@ -200,16 +200,18 @@ namespace MatrixWallpaperEngine
         private Border leftDeckHighlightBorder;
         private int activeTabIndex = 0;
 
-        // Remote Push & Auto-Update Manager + Tab 5 UI Controls
-        private RemoteUpdateManager updateManager = new RemoteUpdateManager();
+        // Cloud Updater & Performance Controls (Tab 5 for Bradley)
         private TextBlock lblUpdateStatusBanner;
-        private TextBlock lblLocalReceiverInfo;
-        private TextBox txtGitHubRepo;
-        private PasswordBox txtGitHubToken;
-        private TextBlock lblPickedGitFolder;
-        private TextBox txtFriendPushIp;
-        private TextBox txtRemoteUpdateUrl;
-        private CheckBox chkAutoCheckUrlOnStartup;
+        private TextBlock lblUpdateDetail;
+        private TextBlock lblUpdateNotes;
+        private Border updateNotesCard;
+        private WpfCardOption btnCheckOrInstallUpdate;
+        private WpfCardOption btnEcoModeToggle;
+        private CheckBox chkAutoCheckUpdates;
+        private CheckBox chkPauseWhenMinimized;
+        private UpdateInfo latestAvailableUpdate = null;
+        private bool isCheckingOrDownloading = false;
+        private bool justUpdatedFromUpdater = false;
 
         // Right Preview & Action Bar
         private Image previewImageControl;
@@ -284,30 +286,10 @@ namespace MatrixWallpaperEngine
 
         public MainStudioWpfWindow(string[] args)
         {
-            renderer = new FastMatrixEngine(config);
+            SettingsStore.Load(config);
+            AppUpdater.CleanupLeftovers();
             ParseCommandLineArgs(args);
-
-            // If launched normally (not in automated screenshot mode), auto-sync newer EXE to installed AppData copy,
-            // start the 45-second Internet Auto-Poller (works on ANY Wi-Fi anywhere via GitHub!),
-            // and start the background TCP Remote Push Receiver on port 49876!
-            if (string.IsNullOrEmpty(screenshotOutputPath))
-            {
-                updateManager.SyncRunningExeToInstalledCopy(false);
-                updateManager.StartPushReceiver(msg =>
-                {
-                    Dispatcher.BeginInvoke(new Action(() =>
-                    {
-                        if (lblUpdateStatusBanner != null) lblUpdateStatusBanner.Text = msg;
-                    }));
-                });
-                updateManager.StartInternetAutoPoller(msg =>
-                {
-                    Dispatcher.BeginInvoke(new Action(() =>
-                    {
-                        if (lblUpdateStatusBanner != null) lblUpdateStatusBanner.Text = msg;
-                    }));
-                });
-            }
+            renderer = new FastMatrixEngine(config);
 
             BuildWpfStudioUI();
             LoadDefaultDemoVideoIfAvailable();
@@ -325,10 +307,14 @@ namespace MatrixWallpaperEngine
                 {
                     SetTutorialStep(tutorialStepIndex);
                 }
+                if (string.IsNullOrEmpty(screenshotOutputPath) && config.AutoCheckUpdates)
+                {
+                    System.Threading.ThreadPool.QueueUserWorkItem(_ => SilentUpdateCheck());
+                }
             };
 
             renderTimer = new DispatcherTimer(DispatcherPriority.Render);
-            renderTimer.Interval = TimeSpan.FromMilliseconds(16);
+            renderTimer.Interval = TimeSpan.FromMilliseconds(config.TargetFps <= 30 ? 33 : 16);
             renderTimer.Tick += OnRenderFrameTick;
             renderTimer.Start();
         }
@@ -339,7 +325,11 @@ namespace MatrixWallpaperEngine
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
-                if (a == "--screenshot" && i + 1 < args.Length)
+                if (a == "--updated")
+                {
+                    justUpdatedFromUpdater = true;
+                }
+                else if (a == "--screenshot" && i + 1 < args.Length)
                 {
                     screenshotOutputPath = args[i + 1];
                     i++;
@@ -636,7 +626,7 @@ namespace MatrixWallpaperEngine
                 "3. Soyjak Memes",
                 "4. Colors & Text",
                 "5. Mouse & FX",
-                "6. Remote Updater"
+                "6. Updates & Eco"
             };
             string[] tabSubs = new string[]
             {
@@ -645,7 +635,7 @@ namespace MatrixWallpaperEngine
                 "Pointing Memes",
                 "Themes & Chars",
                 "Mouse Off + Clock",
-                "Push & Auto-Update"
+                "Check & Laptop Eco"
             };
             Color[] tabAccents = new Color[]
             {
@@ -1566,12 +1556,12 @@ namespace MatrixWallpaperEngine
         }
 
         // =====================================================================
-        // TAB 5: ANY-WIFI GITHUB AUTO-PUSHER & REMOTE UPDATER
+        // TAB 5: GITHUB CLOUD UPDATER & LAPTOP ECO PERFORMANCE
         // =====================================================================
         private UIElement BuildTab5_RemoteUpdater()
         {
             StackPanel sp = new StackPanel();
-            AddSectionHeader(sp, "🌍 WORKS ON ANY WI-FI: GITHUB AUTO-PUSH & REMOTE UPDATER", "Push updates to your GitHub in 1 click — your friend's PC on ANY Wi-Fi anywhere in the world auto-updates every 45s!");
+            AddSectionHeader(sp, "🌍 GITHUB CLOUD UPDATES (BRASSYFROGY/MATRIX-WALLPAPER)", "Check and download the latest version in 1 click over HTTPS TLS 1.2 — works on ANY Wi-Fi worldwide!");
 
             // Live Updater Status Banner
             Border statusCard = new Border
@@ -1580,323 +1570,354 @@ namespace MatrixWallpaperEngine
                 BorderBrush = new SolidColorBrush(Color.FromRgb(0, 235, 165)),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(8),
-                Padding = new Thickness(12, 8, 12, 8),
+                Padding = new Thickness(14, 10, 14, 10),
                 Margin = new Thickness(0, 0, 0, 10)
             };
             StackPanel statusStack = new StackPanel();
-            lblLocalReceiverInfo = new TextBlock
-            {
-                Text = "🌍 Global Wi-Fi Cloud Sync: ACTIVE (Polls GitHub every 45s on ANY Wi-Fi) • Direct Port: " + RemoteUpdateManager.GetLocalIpSummary(),
-                FontSize = 11.2,
-                FontWeight = FontWeights.Bold,
-                Foreground = new SolidColorBrush(Color.FromRgb(110, 255, 205)),
-                TextWrapping = TextWrapping.Wrap
-            };
+
+            string selfSha = AppUpdater.SelfSha();
+            string shortSha = string.IsNullOrEmpty(selfSha) ? "local" : (selfSha.Length > 12 ? selfSha.Substring(0, 12) : selfSha);
+
             lblUpdateStatusBanner = new TextBlock
             {
-                Text = "✔ " + updateManager.LastStatusMessage,
-                FontSize = 11.5,
-                Foreground = Brushes.White,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 4, 0, 0)
+                Text = justUpdatedFromUpdater
+                    ? "🎉 Updated Successfully to the Latest Release!"
+                    : "✔ Matrix Wallpaper Engine — Connected to GitHub Channel",
+                FontSize = 12.5,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(0, 255, 175)),
+                TextWrapping = TextWrapping.Wrap
             };
-            statusStack.Children.Add(lblLocalReceiverInfo);
+            lblUpdateDetail = new TextBlock
+            {
+                Text = string.Format("Repository: {0} ({1}) • Build: {2}", AppUpdater.Repo, AppUpdater.Branch, shortSha),
+                FontSize = 11.0,
+                Foreground = new SolidColorBrush(Color.FromRgb(165, 215, 205)),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 3, 0, 0)
+            };
             statusStack.Children.Add(lblUpdateStatusBanner);
+            statusStack.Children.Add(lblUpdateDetail);
             statusCard.Child = statusStack;
             sp.Children.Add(statusCard);
 
-            // 1. 1-CLICK AUTO-PUSH TO YOUR GITHUB (WORKS OVER ANY WI-FI + FOR ANY PROJECT!)
-            AddSectionHeader(sp, "1. 1-CLICK AUTO-PUSH TO YOUR GITHUB (WORKS ON ANY WI-FI!)", "Enter your GitHub repo once. Clicking Push embeds your repo channel into the EXE & pushes to GitHub so your friend's PC updates on ANY Wi-Fi!");
-
-            TextBlock lblRepoHint = new TextBlock
-            {
-                Text = "Your GitHub Repository (e.g. username/repo or https://github.com/username/repo):",
-                FontSize = 11.5,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = new SolidColorBrush(Color.FromRgb(200, 220, 242)),
-                Margin = new Thickness(2, 0, 2, 3)
-            };
-            sp.Children.Add(lblRepoHint);
-
-            txtGitHubRepo = new TextBox
-            {
-                Text = string.IsNullOrEmpty(updateManager.GitHubRepoInput) ? "username/matrix-wallpaper" : updateManager.GitHubRepoInput,
-                Background = new SolidColorBrush(Color.FromRgb(18, 25, 36)),
-                Foreground = new SolidColorBrush(Color.FromRgb(0, 255, 180)),
-                CaretBrush = Brushes.White,
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0, 225, 165)),
-                BorderThickness = new Thickness(1.5),
-                FontSize = 12.5,
-                FontWeight = FontWeights.Bold,
-                Padding = new Thickness(8, 5, 8, 5),
-                Margin = new Thickness(2, 0, 2, 6)
-            };
-            txtGitHubRepo.TextChanged += (s, e) =>
-            {
-                string slug, gitUrl;
-                string rawUrl = RemoteUpdateManager.NormalizeGitHubRepoToRawUrl(txtGitHubRepo.Text, updateManager.GitHubBranch, out slug, out gitUrl);
-                updateManager.GitHubRepoInput = txtGitHubRepo.Text.Trim();
-                if (!string.IsNullOrEmpty(rawUrl))
-                {
-                    updateManager.RemoteUpdateUrl = rawUrl;
-                    if (txtRemoteUpdateUrl != null) txtRemoteUpdateUrl.Text = rawUrl;
-                }
-                updateManager.SaveSettings();
-            };
-            sp.Children.Add(txtGitHubRepo);
-
-            TextBlock lblTokenHint = new TextBlock
-            {
-                Text = "Optional GitHub Token (ghp_... — Leave blank to use normal Git Browser Login):",
-                FontSize = 11.0,
-                Foreground = new SolidColorBrush(Color.FromRgb(165, 188, 215)),
-                Margin = new Thickness(2, 0, 2, 3)
-            };
-            sp.Children.Add(lblTokenHint);
-
-            txtGitHubToken = new PasswordBox
-            {
-                Password = updateManager.GitHubToken ?? "",
-                Background = new SolidColorBrush(Color.FromRgb(18, 25, 36)),
-                Foreground = new SolidColorBrush(Color.FromRgb(130, 215, 255)),
-                CaretBrush = Brushes.White,
-                BorderBrush = new SolidColorBrush(Color.FromRgb(56, 189, 248)),
-                BorderThickness = new Thickness(1.2),
-                FontSize = 12.0,
-                Padding = new Thickness(8, 4, 8, 4),
-                Margin = new Thickness(2, 0, 2, 8)
-            };
-            txtGitHubToken.PasswordChanged += (s, e) =>
-            {
-                updateManager.GitHubToken = txtGitHubToken.Password;
-                updateManager.SaveSettings();
-            };
-            sp.Children.Add(txtGitHubToken);
-
-            WpfCardOption btnAutoPushWallpaperToGitHub = CreateCardButton(
-                "🚀 1-CLICK AUTO-PUSH THIS WALLPAPER UPDATE TO GITHUB!",
-                "Stamps your GitHub channel into the EXE & pushes to GitHub! Your friend's PC on ANY Wi-Fi will auto-download & restart into this update!",
-                "ANY WI-FI",
+            // Big 1-Click Update Action Button
+            btnCheckOrInstallUpdate = CreateCardButton(
+                "⬇ CHECK FOR UPDATES FROM GITHUB",
+                "Queries BrassyFrogy/matrix-wallpaper for the latest release (safe SHA-256 verification)",
+                "GITHUB HTTPS",
                 Color.FromRgb(0, 245, 185),
                 Color.FromRgb(12, 46, 38),
                 Color.FromRgb(18, 68, 56),
                 false,
-                () => OnAutoPushToGitHubClicked(AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\'), true));
-            btnAutoPushWallpaperToGitHub.CardBorder.Margin = new Thickness(0, 0, 0, 6);
-            sp.Children.Add(btnAutoPushWallpaperToGitHub.CardBorder);
-
-            // Universal GitHub Pusher for ANY other folder/project on the user's PC!
-            WpfCardOption btnAutoPushAnyFolderToGitHub = CreateCardButton(
-                "📁 AUTO-PUSH ANY OTHER FOLDER / PROJECT TO GITHUB...",
-                "Pick ANY folder or project on your PC — automatically runs git init, commits all files, and pushes straight to the GitHub repo above!",
-                "ANY PROJECT",
-                Color.FromRgb(192, 132, 252),
-                Color.FromRgb(26, 22, 44),
-                Color.FromRgb(42, 32, 68),
-                false,
-                () => OnPickAnyFolderAndPushToGitHubClicked());
-            btnAutoPushAnyFolderToGitHub.CardBorder.Margin = new Thickness(0, 0, 0, 4);
-            sp.Children.Add(btnAutoPushAnyFolderToGitHub.CardBorder);
-
-            lblPickedGitFolder = new TextBlock
-            {
-                Text = "Active Project Folder: " + updateManager.CustomGitProjectFolder,
-                FontSize = 10.8,
-                Foreground = new SolidColorBrush(Color.FromRgb(165, 188, 215)),
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(4, 0, 4, 10)
-            };
-            sp.Children.Add(lblPickedGitFolder);
-
-            // 2. AUTOMATIC CLOUD PULL ON ANY WI-FI (POLLS EVERY 45 SECONDS)
-            AddSectionHeader(sp, "2. FRIEND'S PC AUTO-UPDATER (WORKS ON ANY WI-FI ANYWHERE)", "Checks your GitHub repo or direct URL automatically every 45s in the background & on startup:");
-
-            txtRemoteUpdateUrl = new TextBox
-            {
-                Text = updateManager.RemoteUpdateUrl,
-                Background = new SolidColorBrush(Color.FromRgb(18, 25, 36)),
-                Foreground = new SolidColorBrush(Color.FromRgb(130, 215, 255)),
-                CaretBrush = Brushes.White,
-                BorderBrush = new SolidColorBrush(Color.FromRgb(56, 189, 248)),
-                BorderThickness = new Thickness(1.5),
-                FontSize = 11.5,
-                Padding = new Thickness(8, 5, 8, 5),
-                Margin = new Thickness(2, 0, 2, 4)
-            };
-            txtRemoteUpdateUrl.TextChanged += (s, e) =>
-            {
-                updateManager.RemoteUpdateUrl = txtRemoteUpdateUrl.Text.Trim();
-                updateManager.SaveSettings();
-            };
-            sp.Children.Add(txtRemoteUpdateUrl);
-
-            chkAutoCheckUrlOnStartup = CreateStyledCheckBox(
-                "Auto-check GitHub / Cloud URL every 45s & on startup (Works on ANY Wi-Fi!)",
-                updateManager.AutoCheckUrlOnStartup,
-                val =>
-                {
-                    updateManager.AutoCheckUrlOnStartup = val;
-                    updateManager.SaveSettings();
-                });
-            chkAutoCheckUrlOnStartup.Margin = new Thickness(2, 0, 2, 6);
-            sp.Children.Add(chkAutoCheckUrlOnStartup);
-
-            WpfCardOption btnPullFromUrl = CreateCardButton(
-                "⬇ CHECK & INSTALL LATEST GITHUB / CLOUD UPDATE NOW",
-                "Downloads the latest .EXE from your GitHub repo / URL above, overwrites the installed copy, and restarts!",
-                "CLOUD PULL",
-                Color.FromRgb(56, 189, 248),
-                Color.FromRgb(16, 32, 50),
-                Color.FromRgb(22, 48, 74),
-                false,
-                () => OnPullFromUrlClicked());
-            btnPullFromUrl.CardBorder.Margin = new Thickness(0, 0, 0, 10);
-            sp.Children.Add(btnPullFromUrl.CardBorder);
-
-            // 3. LOCAL INSTALLED COPY OVERWRITE & DIRECT IP PUSH
-            AddSectionHeader(sp, "3. SENT HIM A NEW .EXE ON DISCORD OR DIRECT IP PUSH?", "Opening a sent .EXE automatically updates his installed copy! You can also click below or push by IP:");
-
-            WpfCardOption btnPatchInstalledCopy = CreateCardButton(
-                "⚡ OVERWRITE & UPDATE INSTALLED PC COPY + SHORTCUT NOW",
-                "Copies this running .EXE straight into %LocalAppData%\\MatrixWallpaperEngine and refreshes the Desktop shortcut",
-                "AUTO-SYNC",
-                Color.FromRgb(255, 190, 40),
-                Color.FromRgb(28, 26, 18),
-                Color.FromRgb(48, 40, 18),
-                false,
                 () =>
                 {
-                    string msg = updateManager.SyncRunningExeToInstalledCopy(true);
-                    lblUpdateStatusBanner.Text = msg;
+                    if (latestAvailableUpdate != null)
+                        DownloadAndInstallUpdateClicked();
+                    else
+                        CheckForUpdatesClicked();
                 });
-            btnPatchInstalledCopy.CardBorder.Margin = new Thickness(0, 0, 0, 8);
-            sp.Children.Add(btnPatchInstalledCopy.CardBorder);
+            btnCheckOrInstallUpdate.CardBorder.Margin = new Thickness(0, 0, 0, 8);
+            sp.Children.Add(btnCheckOrInstallUpdate.CardBorder);
 
-            txtFriendPushIp = new TextBox
+            // Auto-check on startup checkbox
+            chkAutoCheckUpdates = CreateStyledCheckBox(
+                "Check for updates automatically in the background on startup",
+                config.AutoCheckUpdates,
+                val =>
+                {
+                    config.AutoCheckUpdates = val;
+                    SettingsStore.SaveIfChanged(config);
+                });
+            chkAutoCheckUpdates.Margin = new Thickness(2, 0, 2, 8);
+            sp.Children.Add(chkAutoCheckUpdates);
+
+            // Release Notes Card (hidden until update info loaded)
+            updateNotesCard = new Border
             {
-                Text = updateManager.FriendHostIp,
-                Background = new SolidColorBrush(Color.FromRgb(18, 25, 36)),
-                Foreground = new SolidColorBrush(Color.FromRgb(0, 255, 180)),
-                CaretBrush = Brushes.White,
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0, 210, 160)),
+                Background = new SolidColorBrush(Color.FromRgb(16, 24, 38)),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(56, 189, 248)),
                 BorderThickness = new Thickness(1.2),
-                FontSize = 12.0,
-                Padding = new Thickness(8, 4, 8, 4),
-                Margin = new Thickness(2, 0, 2, 4)
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12, 8, 12, 8),
+                Margin = new Thickness(0, 0, 0, 10),
+                Visibility = Visibility.Collapsed
             };
-            sp.Children.Add(txtFriendPushIp);
+            StackPanel notesStack = new StackPanel();
+            TextBlock lblNotesTitle = new TextBlock
+            {
+                Text = "📜 WHAT'S NEW IN THIS VERSION:",
+                FontSize = 11.2,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(56, 189, 248)),
+                Margin = new Thickness(0, 0, 0, 3)
+            };
+            lblUpdateNotes = new TextBlock
+            {
+                Text = "",
+                FontSize = 11.5,
+                Foreground = Brushes.White,
+                TextWrapping = TextWrapping.Wrap
+            };
+            notesStack.Children.Add(lblNotesTitle);
+            notesStack.Children.Add(lblUpdateNotes);
+            updateNotesCard.Child = notesStack;
+            sp.Children.Add(updateNotesCard);
 
-            WpfCardOption btnPushCurrentExe = CreateCardButton(
-                "📡 Direct IP / Tailscale / VPN Push to Friend's PC",
-                "Sends this .EXE directly to the IP address above on port 49876",
-                null,
-                Color.FromRgb(56, 189, 248),
-                Color.FromRgb(18, 28, 42),
-                Color.FromRgb(22, 42, 64),
-                false,
-                () => OnPushCurrentExeToFriendClicked(null));
-            btnPushCurrentExe.CardBorder.Margin = new Thickness(0, 0, 0, 6);
-            sp.Children.Add(btnPushCurrentExe.CardBorder);
+            // 2. LAPTOP PERFORMANCE & ECO MODE (OPTIMIZED FOR BRADLEY'S ACER CELERON)
+            AddSectionHeader(sp, "⚡ LAPTOP PERFORMANCE & ECO MODE (ACER / CELERON BOOST)", "Designed specifically to run cool, lightweight, and stutter-free on 10-year-old dual-core laptops:");
 
+            bool isEco = config.TargetFps <= 30;
+            btnEcoModeToggle = CreateCardButton(
+                isEco ? "🌱 ECO MODE: ACTIVE (30 FPS)" : "⚡ MAXIMUM SMOOTHNESS: ACTIVE (60 FPS)",
+                isEco ? "Low CPU & battery saver for older Acer/Celeron laptops (Click to toggle 60 FPS)" : "Full 60 FPS buttery smooth desktop rendering (Click to switch to 30 FPS Eco Mode)",
+                isEco ? "30 FPS ECO" : "60 FPS TURBO",
+                isEco ? Color.FromRgb(0, 245, 160) : Color.FromRgb(255, 190, 40),
+                isEco ? Color.FromRgb(14, 44, 34) : Color.FromRgb(38, 30, 16),
+                isEco ? Color.FromRgb(20, 60, 46) : Color.FromRgb(54, 42, 22),
+                isEco,
+                () =>
+                {
+                    if (config.TargetFps <= 30)
+                        config.TargetFps = 60;
+                    else
+                        config.TargetFps = 30;
+
+                    renderTimer.Interval = TimeSpan.FromMilliseconds(config.TargetFps <= 30 ? 33 : 16);
+                    SettingsStore.SaveIfChanged(config);
+                    SyncAllControlsWithConfig();
+                });
+            btnEcoModeToggle.CardBorder.Margin = new Thickness(0, 0, 0, 8);
+            sp.Children.Add(btnEcoModeToggle.CardBorder);
+
+            chkPauseWhenMinimized = CreateStyledCheckBox(
+                "Pause rendering calculations when this window is minimized & detached",
+                config.PauseWhenMinimized,
+                val =>
+                {
+                    config.PauseWhenMinimized = val;
+                    SettingsStore.SaveIfChanged(config);
+                });
+            chkPauseWhenMinimized.Margin = new Thickness(2, 0, 2, 8);
+            sp.Children.Add(chkPauseWhenMinimized);
+
+            Border perfInfoCard = new Border
+            {
+                Background = new SolidColorBrush(Color.FromRgb(16, 20, 30)),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(40, 52, 70)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12, 8, 12, 8),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            StackPanel perfStack = new StackPanel();
+            TextBlock p1 = new TextBlock
+            {
+                Text = "• 100% Native GDI32 Direct Blitting (No slow Bitmap.LockBits or memory leaks)",
+                FontSize = 10.8,
+                Foreground = new SolidColorBrush(Color.FromRgb(160, 185, 210)),
+                Margin = new Thickness(0, 0, 0, 2)
+            };
+            TextBlock p2 = new TextBlock
+            {
+                Text = "• Zero per-frame GC allocations — preallocated contiguous 32-bit pixel buffers",
+                FontSize = 10.8,
+                Foreground = new SolidColorBrush(Color.FromRgb(160, 185, 210)),
+                Margin = new Thickness(0, 0, 0, 2)
+            };
+            TextBlock p3 = new TextBlock
+            {
+                Text = "• Background updater uses tiny ~200B JSON manifest to prevent Wi-Fi bandwidth usage",
+                FontSize = 10.8,
+                Foreground = new SolidColorBrush(Color.FromRgb(160, 185, 210))
+            };
+            perfStack.Children.Add(p1);
+            perfStack.Children.Add(p2);
+            perfStack.Children.Add(p3);
+            perfInfoCard.Child = perfStack;
+            sp.Children.Add(perfInfoCard);
+
+            // 3. DIAGNOSTICS & OPEN APPDATA / GITHUB
+            AddSectionHeader(sp, "📁 DIAGNOSTICS & LOGS", "View rolling logs or open the GitHub releases page:");
+
+            Grid diagRow = new Grid { Margin = new Thickness(0, 0, 0, 8) };
+            diagRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            diagRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+            diagRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            Button btnOpenLog = CreateFlatWpfButton("📋 VIEW LOG FILE", Color.FromRgb(42, 56, 76), Color.FromRgb(140, 210, 255), () =>
+            {
+                try
+                {
+                    string p = System.IO.Path.Combine(AppUpdater.DataDir, "app.log");
+                    if (!System.IO.File.Exists(p))
+                    {
+                        System.IO.File.WriteAllText(p, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  Log initialized.\r\n");
+                    }
+                    Process.Start("notepad.exe", p);
+                }
+                catch { }
+            });
+            Grid.SetColumn(btnOpenLog, 0);
+            diagRow.Children.Add(btnOpenLog);
+
+            Button btnOpenRepo = CreateFlatWpfButton("🌐 GITHUB REPO", Color.FromRgb(36, 46, 68), Color.FromRgb(0, 235, 170), () =>
+            {
+                try { Process.Start(AppUpdater.RepoUrl); } catch { }
+            });
+            Grid.SetColumn(btnOpenRepo, 2);
+            diagRow.Children.Add(btnOpenRepo);
+
+            sp.Children.Add(diagRow);
             return sp;
         }
 
-        private void OnAutoPushToGitHubClicked(string folderToPush, bool isWallpaperUpdate)
+        private void CheckForUpdatesClicked()
         {
-            string repo = txtGitHubRepo != null ? txtGitHubRepo.Text.Trim() : updateManager.GitHubRepoInput;
-            string token = txtGitHubToken != null ? txtGitHubToken.Password.Trim() : updateManager.GitHubToken;
+            if (isCheckingOrDownloading) return;
+            isCheckingOrDownloading = true;
 
-            lblUpdateStatusBanner.Text = "⏳ Starting 1-Click GitHub Auto-Push to " + repo + "...";
-            lblUpdateStatusBanner.Foreground = new SolidColorBrush(Color.FromRgb(130, 225, 255));
+            lblUpdateStatusBanner.Text = "⏳ Checking GitHub for updates...";
+            lblUpdateStatusBanner.Foreground = new SolidColorBrush(Color.FromRgb(120, 215, 255));
+            btnCheckOrInstallUpdate.TitleBlock.Text = "⏳ CHECKING GITHUB...";
+            btnCheckOrInstallUpdate.SubBlock.Text = "Fetching version manifest from BrassyFrogy/matrix-wallpaper...";
 
             System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
-                string finalMsg;
-                bool ok = updateManager.AutoPushProjectToGitHub(
-                    folderToPush,
-                    repo,
-                    updateManager.GitHubBranch,
-                    token,
-                    isWallpaperUpdate,
-                    progressMsg =>
-                    {
-                        Dispatcher.BeginInvoke(new Action(() =>
-                        {
-                            lblUpdateStatusBanner.Text = progressMsg;
-                        }));
-                    },
-                    out finalMsg);
-
+                string err;
+                UpdateInfo info = AppUpdater.FetchLatest(out err);
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    lblUpdateStatusBanner.Text = finalMsg;
-                    lblUpdateStatusBanner.Foreground = ok
-                        ? new SolidColorBrush(Color.FromRgb(0, 255, 165))
-                        : new SolidColorBrush(Color.FromRgb(255, 165, 95));
-                    if (txtRemoteUpdateUrl != null && !string.IsNullOrEmpty(updateManager.RemoteUpdateUrl))
+                    isCheckingOrDownloading = false;
+                    if (info == null)
                     {
-                        txtRemoteUpdateUrl.Text = updateManager.RemoteUpdateUrl;
+                        lblUpdateStatusBanner.Text = "⚠ " + (string.IsNullOrEmpty(err) ? "Update check failed." : err);
+                        lblUpdateStatusBanner.Foreground = new SolidColorBrush(Color.FromRgb(255, 160, 90));
+                        btnCheckOrInstallUpdate.TitleBlock.Text = "⬇ CHECK FOR UPDATES AGAIN";
+                        btnCheckOrInstallUpdate.SubBlock.Text = "Couldn't reach GitHub. Click to retry.";
+                        return;
+                    }
+
+                    if (AppUpdater.IsNewer(info))
+                    {
+                        latestAvailableUpdate = info;
+                        double mb = info.Size / (1024.0 * 1024.0);
+                        lblUpdateStatusBanner.Text = string.Format("🚀 New Update Available: v{0}! ({1:F2} MB)", info.Version, mb);
+                        lblUpdateStatusBanner.Foreground = new SolidColorBrush(Color.FromRgb(0, 245, 175));
+
+                        btnCheckOrInstallUpdate.TitleBlock.Text = string.Format("🚀 DOWNLOAD & INSTALL UPDATE v{0} NOW", info.Version);
+                        btnCheckOrInstallUpdate.SubBlock.Text = string.IsNullOrEmpty(info.Notes) ? "Click to download, verify checksum, and restart" : ("Notes: " + info.Notes);
+                        btnCheckOrInstallUpdate.CardBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0, 255, 170));
+                        btnCheckOrInstallUpdate.CardBorder.Background = new SolidColorBrush(Color.FromRgb(16, 48, 38));
+
+                        if (!string.IsNullOrEmpty(info.Notes) && updateNotesCard != null)
+                        {
+                            lblUpdateNotes.Text = info.Notes;
+                            updateNotesCard.Visibility = Visibility.Visible;
+                        }
+                    }
+                    else
+                    {
+                        latestAvailableUpdate = null;
+                        lblUpdateStatusBanner.Text = string.Format("✔ You're up to date! (v{0} is running)", string.IsNullOrEmpty(info.Version) ? "latest" : info.Version);
+                        lblUpdateStatusBanner.Foreground = new SolidColorBrush(Color.FromRgb(0, 255, 165));
+                        btnCheckOrInstallUpdate.TitleBlock.Text = "✔ UP TO DATE — CHECK AGAIN";
+                        btnCheckOrInstallUpdate.SubBlock.Text = "Your files match the latest release on GitHub.";
+                        if (!string.IsNullOrEmpty(info.Notes) && updateNotesCard != null)
+                        {
+                            lblUpdateNotes.Text = "Latest Release Notes (v" + info.Version + "):\n" + info.Notes;
+                            updateNotesCard.Visibility = Visibility.Visible;
+                        }
                     }
                 }));
             });
         }
 
-        private void OnPickAnyFolderAndPushToGitHubClicked()
+        private void DownloadAndInstallUpdateClicked()
         {
-            using (System.Windows.Forms.FolderBrowserDialog fbd = new System.Windows.Forms.FolderBrowserDialog())
+            if (latestAvailableUpdate == null || isCheckingOrDownloading) return;
+            isCheckingOrDownloading = true;
+
+            lblUpdateStatusBanner.Text = "⏳ Downloading update from GitHub... 0%";
+            lblUpdateStatusBanner.Foreground = new SolidColorBrush(Color.FromRgb(120, 220, 255));
+            btnCheckOrInstallUpdate.TitleBlock.Text = "⏳ DOWNLOADING UPDATE...";
+            btnCheckOrInstallUpdate.SubBlock.Text = "Downloading and verifying SHA-256 checksum...";
+
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
-                fbd.Description = "Select ANY Folder or Project on Your PC to Auto-Push to Your GitHub Repository:";
-                fbd.SelectedPath = updateManager.CustomGitProjectFolder;
-                if (fbd.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                string err;
+                bool success = AppUpdater.DownloadAndInstall(latestAvailableUpdate, pct =>
                 {
-                    updateManager.CustomGitProjectFolder = fbd.SelectedPath;
-                    updateManager.SaveSettings();
-                    if (lblPickedGitFolder != null)
+                    Dispatcher.BeginInvoke(new Action(() =>
                     {
-                        lblPickedGitFolder.Text = "Active Project Folder: " + fbd.SelectedPath;
+                        lblUpdateStatusBanner.Text = string.Format("⏳ Downloading update from GitHub... {0}%", pct);
+                        btnCheckOrInstallUpdate.SubBlock.Text = string.Format("Downloading payload: {0}% complete", pct);
+                    }));
+                }, out err);
+
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    isCheckingOrDownloading = false;
+                    if (success)
+                    {
+                        lblUpdateStatusBanner.Text = "⚡ Update verified and installed! Restarting...";
+                        lblUpdateStatusBanner.Foreground = new SolidColorBrush(Color.FromRgb(0, 255, 165));
+                        btnCheckOrInstallUpdate.TitleBlock.Text = "⚡ RESTARTING APPLICATION...";
+                        btnCheckOrInstallUpdate.SubBlock.Text = "Launching into the new update now!";
+
+                        System.Threading.ThreadPool.QueueUserWorkItem(__ =>
+                        {
+                            System.Threading.Thread.Sleep(400);
+                            AppUpdater.RestartSelf();
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                Application.Current.Shutdown();
+                            }));
+                        });
                     }
-                    OnAutoPushToGitHubClicked(fbd.SelectedPath, false);
+                    else
+                    {
+                        lblUpdateStatusBanner.Text = "⚠ Update installation failed: " + err;
+                        lblUpdateStatusBanner.Foreground = new SolidColorBrush(Color.FromRgb(255, 140, 120));
+                        btnCheckOrInstallUpdate.TitleBlock.Text = "⚠ RETRY UPDATE";
+                        btnCheckOrInstallUpdate.SubBlock.Text = "Click to retry downloading the update.";
+                    }
+                }));
+            });
+        }
+
+        private void SilentUpdateCheck()
+        {
+            try
+            {
+                string err;
+                UpdateInfo info = AppUpdater.FetchLatest(out err);
+                if (info != null && AppUpdater.IsNewer(info))
+                {
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        latestAvailableUpdate = info;
+                        if (lblUpdateStatusBanner != null)
+                        {
+                            lblUpdateStatusBanner.Text = string.Format("🚀 New Update Available: v{0}! Click below to install.", info.Version);
+                            lblUpdateStatusBanner.Foreground = new SolidColorBrush(Color.FromRgb(0, 245, 175));
+                        }
+                        if (btnCheckOrInstallUpdate != null)
+                        {
+                            btnCheckOrInstallUpdate.TitleBlock.Text = string.Format("🚀 DOWNLOAD & INSTALL UPDATE v{0} NOW", info.Version);
+                            btnCheckOrInstallUpdate.SubBlock.Text = string.IsNullOrEmpty(info.Notes) ? "Click to install update and restart" : ("Update notes: " + info.Notes);
+                            btnCheckOrInstallUpdate.CardBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0, 255, 170));
+                            btnCheckOrInstallUpdate.CardBorder.Background = new SolidColorBrush(Color.FromRgb(16, 48, 38));
+                        }
+                        if (!string.IsNullOrEmpty(info.Notes) && updateNotesCard != null)
+                        {
+                            lblUpdateNotes.Text = info.Notes;
+                            updateNotesCard.Visibility = Visibility.Visible;
+                        }
+                    }));
                 }
             }
-        }
-
-        private void OnPushCurrentExeToFriendClicked(string customExePath)
-        {
-            string targetIp = txtFriendPushIp != null ? txtFriendPushIp.Text.Trim() : updateManager.FriendHostIp;
-            lblUpdateStatusBanner.Text = "⏳ Connecting to friend's PC at " + targetIp + ":" + RemoteUpdateManager.DefaultPushPort + "...";
-
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                string resultMsg;
-                bool ok = updateManager.PushExeToFriendPc(targetIp, customExePath, out resultMsg);
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    lblUpdateStatusBanner.Text = resultMsg;
-                    lblUpdateStatusBanner.Foreground = ok
-                        ? new SolidColorBrush(Color.FromRgb(0, 255, 165))
-                        : new SolidColorBrush(Color.FromRgb(255, 130, 140));
-                }));
-            });
-        }
-
-        private void OnPullFromUrlClicked()
-        {
-            string urlOrRepo = txtRemoteUpdateUrl != null && !string.IsNullOrEmpty(txtRemoteUpdateUrl.Text.Trim())
-                ? txtRemoteUpdateUrl.Text.Trim()
-                : (txtGitHubRepo != null ? txtGitHubRepo.Text.Trim() : updateManager.RemoteUpdateUrl);
-            lblUpdateStatusBanner.Text = "⏳ Checking GitHub / Cloud URL for latest update over Wi-Fi...";
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                string resultMsg;
-                bool ok = updateManager.CheckAndApplyFromUrl(urlOrRepo, false, out resultMsg);
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    lblUpdateStatusBanner.Text = resultMsg;
-                    lblUpdateStatusBanner.Foreground = ok
-                        ? new SolidColorBrush(Color.FromRgb(0, 255, 165))
-                        : new SolidColorBrush(Color.FromRgb(255, 175, 95));
-                }));
-            });
+            catch { }
         }
 
         // =====================================================================
@@ -2702,6 +2723,21 @@ namespace MatrixWallpaperEngine
                     bottomDesktopBarBorder.BorderBrush = new SolidColorBrush(active ? Color.FromRgb(245, 90, 110) : Color.FromRgb(0, 225, 120));
                 }
             }
+
+            if (btnEcoModeToggle != null)
+            {
+                bool isEco = config.TargetFps <= 30;
+                btnEcoModeToggle.SetSelected(isEco);
+                btnEcoModeToggle.TitleBlock.Text = isEco
+                    ? "🌱 ECO MODE: ACTIVE (30 FPS)"
+                    : "⚡ MAXIMUM SMOOTHNESS: ACTIVE (60 FPS)";
+                btnEcoModeToggle.SubBlock.Text = isEco
+                    ? "Low CPU & battery saver for older Acer/Celeron laptops (Click to toggle 60 FPS)"
+                    : "Full 60 FPS buttery smooth desktop rendering (Click to switch to 30 FPS Eco Mode)";
+            }
+            if (chkAutoCheckUpdates != null) chkAutoCheckUpdates.IsChecked = config.AutoCheckUpdates;
+            if (chkPauseWhenMinimized != null) chkPauseWhenMinimized.IsChecked = config.PauseWhenMinimized;
+            SettingsStore.SaveIfChanged(config);
         }
 
         private void OnUploadMp4Clicked()
@@ -2794,7 +2830,12 @@ namespace MatrixWallpaperEngine
             isRenderingFrame = true;
             try
             {
-                float dt = 0.016f;
+                if (config.PauseWhenMinimized && this.WindowState == WindowState.Minimized && !config.AttachedToDesktop)
+                {
+                    return;
+                }
+
+                float dt = config.TargetFps <= 30 ? 0.033f : 0.016f;
 
                 if (config.AttachedToDesktop && wallpaperForm != null && !wallpaperForm.IsDisposed)
                 {
@@ -2810,16 +2851,20 @@ namespace MatrixWallpaperEngine
                     renderer.RenderStep(pw, ph, dt);
                 }
 
-                int cw = renderer.CanvasWidth;
-                int ch = renderer.CanvasHeight;
-                if (cw > 0 && ch > 0)
+                // If minimized or hidden, bypass copying into WriteableBitmap preview to save massive CPU on Celeron laptops
+                if (this.WindowState != WindowState.Minimized && this.IsVisible)
                 {
-                    if (previewWriteableBmp == null || previewWriteableBmp.PixelWidth != cw || previewWriteableBmp.PixelHeight != ch)
+                    int cw = renderer.CanvasWidth;
+                    int ch = renderer.CanvasHeight;
+                    if (cw > 0 && ch > 0)
                     {
-                        previewWriteableBmp = new WriteableBitmap(cw, ch, 96, 96, PixelFormats.Pbgra32, null);
-                        previewImageControl.Source = previewWriteableBmp;
+                        if (previewWriteableBmp == null || previewWriteableBmp.PixelWidth != cw || previewWriteableBmp.PixelHeight != ch)
+                        {
+                            previewWriteableBmp = new WriteableBitmap(cw, ch, 96, 96, PixelFormats.Pbgra32, null);
+                            previewImageControl.Source = previewWriteableBmp;
+                        }
+                        renderer.CopyToWriteableBitmap(previewWriteableBmp);
                     }
-                    renderer.CopyToWriteableBitmap(previewWriteableBmp);
                 }
 
                 frameCounter++;
@@ -2890,7 +2935,7 @@ namespace MatrixWallpaperEngine
         protected override void OnClosed(EventArgs e)
         {
             if (renderTimer != null) renderTimer.Stop();
-            if (updateManager != null) updateManager.StopPushReceiver();
+            try { SettingsStore.SaveIfChanged(config); } catch { }
             if (wallpaperForm != null && !wallpaperForm.IsDisposed)
             {
                 wallpaperForm.DetachFromDesktop();

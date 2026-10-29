@@ -1,0 +1,7 @@
+{
+  "version": "2.1.0",
+  "sha256": "f3492255be8fbf47122aa07001738b28a62230c03d384fc28d05c393133352c8",
+  "exe": "MatrixWallpaperEngine.exe",
+  "size": 856064,
+  "notes": "Performance boost for Bradley's Acer Celeron laptop: Eco Mode (30 FPS), zero-allocation GDI32 direct blitting, reduced background CPU usage, and seamless GitHub auto-pull."
+}
